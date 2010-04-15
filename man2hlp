@@ -57,7 +57,7 @@ sub print_string($) {
     }
     else {
         # Split into words
-        
+        ...
     }
 }
 
@@ -152,12 +152,12 @@ sub main() {
                 $lc_node = 
             }
         }
-        chomp;
+
         if (defined $lc_node) {
-            
+            ...
         }
     }
-    
+    ...
 }
 
 main();
