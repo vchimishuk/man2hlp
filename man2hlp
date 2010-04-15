@@ -1,0 +1,163 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+# Current output column
+my $col = 0;
+
+# Current output row
+my $out_row = 1;
+
+# Current input filename
+my $c_in;
+
+# Output file
+my $f_out;
+
+# Flag: Copy input to output verbatim
+my $verbatim_flag = 0;
+
+# Flag: Next line is a link
+my $link_flag = 0;
+
+# Indentation level, n spaces
+my $indentation;
+
+# Flag: .TP paragraph
+# 1 = this line is .TP label,
+# 2 = first line of label description.
+my $tp_flag;
+
+# Change output line
+sub newline() {
+    $out_row++;
+    $col = 0;
+    print $f_out "\n";
+}
+
+#Output the string
+sub print_string($) {
+    my $buffer = shift;
+
+    # The length of current word
+    my $len;
+    # Current character
+    my $c_num = 0;
+    my $backslash_flag = 0;
+
+    # Skipping lines?
+    return if $skip_flag;
+
+    # Copying verbatim?
+    if ($verbatim_flag) {
+        # Attempt to handle backslash quoting
+        $buffer =~ s/(\\(.))/\2/g;
+        print $f_out $buffer;
+    }
+    else {
+        # Split into words
+        
+    }
+}
+
+sub fopen_error($) {
+    my ($filename) = @_;
+    warn "man2hlp: Cannot open file $filename\n";
+    exit 3;
+}
+
+sub main() {
+    if (@ARGV != 3) {
+        warn "Usage: man2hlp file.man template_file helpfile\n";
+        return 3;
+    }
+
+    my ($c_man, $c_tmpl, $c_out) = @ARGV;
+
+    # First stage - process the manual, write to the output file
+    open(my $f_man, '<', $c_man) or fopen_error($c_man);
+    open(my $f_out, '>', $c_out) or fopen_error($c_out);
+    $c_in = $c_man;
+
+    # Repeat for each input line
+    while (<$f_man>) {
+        my $buffer = $_;
+        my $input_line = $_;
+        # Remove terminating newline
+        chomp $input_line;
+        # Input line without initial
+        $input_line =~ s/^\\&//;
+
+        if ($verbatim_flag) {
+            if ($input_line eq ".fi") {
+                $verbatim_flag = 0;
+            }
+            else {
+                print_string $input_line;
+                newline;
+            }
+        }
+        elsif ($link_flag) {
+            # The line is a link
+            handle_link $input_line;
+        }
+        elsif (substr($buffer, 0, 1) eq '.') {
+            # The line is a roff command
+            handle_command $input_line;
+        }
+        else {
+            # A normal line, just output it
+            print_string $input_line;
+        }
+
+        # .TP label processed as usual line
+        if ($tp_flag) {
+            if ($tp_flag == 1) {
+                $tp_flag = 2;
+            }
+            else {
+                $tp_flag = 0;
+                $indentation = 8;
+                if ($col >= $indentation) {
+                    newline;
+                }
+                else {
+                    while (++$col < $indentation) {
+                        print $f_out, ' ';
+                    }
+                }
+            }
+        }
+    }
+
+    newline;
+    close $f_man or fclose_error($c_man);
+    # First stage ends here, closing the manual
+
+    # Second stage - process the template file
+    open my $f_tmpl, '<', $c_tmpl or fopen_error($c_tmpl);
+    $c_in = $c_tmpl;
+
+    my $lc_node = undef;
+
+    # Repeat for each input line
+    while (<$f_tmpl>) {
+        my $buffer = $_;
+        chomp $buffer;
+
+        if (defined $lc_node) {
+            if ($buffer ne '') {
+                $cnode{'lname'} = $buffer;
+                $lc_node = 
+            }
+        }
+        chomp;
+        if (defined $lc_node) {
+            
+        }
+    }
+    
+}
+
+main();
