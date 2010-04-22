@@ -3,6 +3,9 @@
 use strict;
 use warnings;
 
+# Imported constants
+my $CHAR_NODE_END = chr(4);
+
 # Current output column
 my $col = 0;
 
@@ -28,6 +31,9 @@ my $indentation;
 # 1 = this line is .TP label,
 # 2 = first line of label description.
 my $tp_flag;
+
+# Current node
+my $cnode;
 
 # Change output line
 sub newline() {
@@ -149,12 +155,36 @@ sub main() {
         if (defined $lc_node) {
             if ($buffer ne '') {
                 $cnode{'lname'} = $buffer;
-                $lc_node = 
             }
+            $lc_node = undef;
         }
+        else {
+            my $char_node_end = index($buffer, CHAR_NODE_END);
+            $lc_node = $char_node_end < 0 ? undef : substr($buffer, $char_node_end);
 
-        if (defined $lc_node) {
-            ...
+            if (defined(lc_node) && substr(lc_node, 1, 1) eq '[') {
+                my $p = index($lc_node, ']');
+                if ($p >= 0) {
+                    if (substr($lc_node, 1, 6) eq '[main]') {
+                        $lc_node = undef;
+                    }
+                    else {
+                        if (! defined $cnode) {
+                            $cnode = &$nodes;
+                        }
+                        else {
+                            $cnode->{'next'} = {};
+                            $cnode = $cnode->{'next'};
+                        }
+                        $cnode->{'$node'} = substr($lc_node, 1, $p-1);
+                        $cnode->{'lname'} = undef;
+                        $cnode->{'next'} = undef;
+                        $cnode->{'heading_level'} = 0;
+                    }
+                }
+                else {
+                    $lc_node = undef;
+                }
         }
     }
     ...
