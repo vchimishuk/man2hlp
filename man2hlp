@@ -73,6 +73,17 @@ sub fopen_error($) {
     exit 3;
 }
 
+sub fclose_error($) {
+    my ($filename) = @_;
+    if (defined $filename) {
+        warn "man2hlp: Cannot close file $filename\n";
+    }
+    else {
+        warn "man2hlp: Cannot close file\n";
+    }
+    exit 3;
+}
+
 sub main() {
     if (@ARGV != 3) {
         warn "Usage: man2hlp file.man template_file helpfile\n";
@@ -159,7 +170,7 @@ sub main() {
             $lc_node = undef;
         }
         else {
-            my $char_node_end = index($buffer, CHAR_NODE_END);
+            my $char_node_end = index($buffer, $CHAR_NODE_END);
             $lc_node = $char_node_end < 0 ? undef : substr($buffer, $char_node_end);
 
             if (defined(lc_node) && substr(lc_node, 1, 1) eq '[') {
@@ -186,8 +197,98 @@ sub main() {
                     $lc_node = undef;
                 }
         }
+        else {
+            $lc_node = undef;
+        }
+        print $f_out $buffer;
     }
-    ...
+
+    $cont_start = tell $f_out;
+    if ($cont_start <= 0) {
+        perror $c_out;
+        exit 1;
+    }
+
+    if ($topics) {
+        printf $f_out "\004[Contents]\n%s\n\n", $topics;
+    }
+    else {
+        printf $f_out "\004[Contents]\n";
+    }
+
+    for ($current_link = $links; defined $current_link && defined $current_link->{'linkname'};) {
+        my $found = 0;
+        my $next = $current_link->{'next'};
+
+        if ($current_link->{'linkname'} eq "Contents") {
+            found = 1;
+        }
+        else {
+            for ($cnode = &$nodes; defined $cnode && defined $cnode->{'node'}; $cnode = $cnode->{'next'}) {
+                if ($cnode->{'node'} eq $current_link->{'linkname'}) {
+                    $found = 1;
+                    last;
+                }
+            }
+        }
+        if (! $found) {
+            $buffer = sprintf "Stale link \"%s\"", $current_link->{'linkname'};
+            $c_in = $current_link->{'filename'};
+            $in_row = $current_link->{'line'};
+            print_error $buffer;
+        }
+
+        $current_link = $next;
+    }
+
+    for ($cnode = &$nodes; defined $cnode && defined $cnode->{'node'};) {
+        my $next = $cnode->{'next'};
+        $lc_node = $cnode->{'node'};
+
+        if (defined $lc_node && $lc_node ne '') {
+            printf $f_out "  %*s\001%s\002%s\003", $cnode->{'heading_level'},
+                "", $cnode->{'lname'} ? $cnode->{'lname'} : $lc_node, $lc_node;
+        }
+        printf $f_out "\n";
+
+        $cnode = $next;
+    }
+
+    $file_end = tell $f_out;
+
+    # Sanity check
+    if (($file_end <= 0) || ($file_end - $cont_start <= 0)) {
+        perror $c_out;
+        exit 1;
+    }
+
+    close $f_out or fclose_error($c_out);
+    close $f_tmpl or fclose_error($c_tmpl);
+
+    # Second stage ends here, closing all files, note the end of output
+
+    #
+    # Third stage - swap two parts of the output file.
+    # First, open the output file for reading and load it into the memory.
+    #
+    ## TODO: replace writing to f_out by writing to a string
+    $outfile_buffer = '';
+    open $f_out, '<', $c_out or fopen_error($c_out);
+    $outfile_buffer .= $_ while <$f_out>;
+    close $f_out or fclose_error($c_out);
+    # Now the output file is in the memory
+
+    # Again open output file for writing
+    open $f_out, '>', $c_out or fopen_error $c_out;
+
+    # Write part after the "Contents" node
+    print $fout substr($outfile_buffer, $cont_start, $file_end - $cont_start);
+
+    # Write part before the "Contents" node
+    printf $f_out substr($outfile_buffer, 0, cont_start-1);
+    close $f_out or fclose_error($c_out);
 }
+
+
 
 main();
