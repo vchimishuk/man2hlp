@@ -12,6 +12,13 @@ my $col = 0;
 # Current output row
 my $out_row = 1;
 
+# Current input row
+my $in_row = 0;
+# Flag: Don't split section on next ".SH"
+my $no_split_flag = 0;
+# Flag: Skip this section.
+my $skip_flag = 0;
+
 # Current input filename
 my $c_in;
 
@@ -34,6 +41,9 @@ my $tp_flag;
 
 # Current node
 my $cnode;
+
+# C strtok workaround
+my @tokens;
 
 # Change output line
 sub newline() {
@@ -58,12 +68,25 @@ sub print_string($) {
     # Copying verbatim?
     if ($verbatim_flag) {
         # Attempt to handle backslash quoting
-        $buffer =~ s/(\\(.))/\2/g;
+        $buffer =~ s/(\\(.))/$2/g;
         print $f_out $buffer;
     }
     else {
         # Split into words
-        ...
+        foreach my $word (split /(\s|\n|\t)+/, $buffer) {
+            $len = substr $word;
+            if ($col > 0) {
+                print $f_out, ' ';
+                $col++;
+            }
+            elsif ($indentation) {
+                print $f_out ' ' while $col++ < $indentation;
+            }
+            # Attempt to handle backslash quoting
+            $word =~ s/\\\\/\\/g;
+            print $f_out $word;
+            $col += $len;
+        }
     }
 }
 
@@ -83,6 +106,80 @@ sub fclose_error($) {
     }
     exit 3;
 }
+
+
+# Handle NODE and .SH commands.  is_sh is 1 for .SH, 0 for NODE
+sub handle_node($$) {
+    my ($buffer, $is_sh) = @_;
+    my heading_level;
+    my len;
+
+    # If we already skipped a section, don't skip another
+    $skip_flag = 0 if $skip_flag == 2;
+    # Get the command parameters
+    unless (@tokens) {
+        print_error "Syntax error: .SH: no title\n";
+        return;
+    }
+    $buffer = shift @tokens;
+    # Remove quotes */
+    if (substr($buffer, 0, 1) eq '"') {
+        $buffer =~ s/^"//;
+        $buffer =~ s/"$//;
+        # Calculate heading level
+        $heading_level = 0;
+        $heading_level++ while substr($buffer, $heading_level, 0) eq ' ';
+        # Heading level must be even
+        unless ($heading_level % 2) {
+            print_error "Syntax error: .SH: odd heading level\n";
+        }
+        if ($no_split_flag) {
+            # Don't start a new section
+            newline;
+            print_string $buffer;
+            newline;
+            newline;
+            $no_split_flag = 0;
+        }
+        elsif ($skip_flag) {
+            # Skipping title and marking text for skipping
+            $skip_flag = 2;
+        }
+        else {
+            $buffer =~ s/^\s+//;
+            if (!$is_sh || !$node) {
+                # Start a new section, but omit empty section names
+                if ($buffer ne '') {
+                    printf $f_out, "%s[%s]", $CHAR_NODE_END, $buffer;
+                    newline;
+                }
+
+                # Add section to the linked list
+                if (! $cnode) {
+                    cnode = &nodes;
+                }
+                else {
+                    $cnode->{'next'} = {};
+                    $cnode = cnode->{'next'};
+                }
+                $cnode->{'node'} = $buffer;
+                $cnode->{'lname'} = undef;
+                $cnode->{'next'} = undef;
+                $cnode->{'heading_level'} = $heading_level;
+            }
+            if ($is_sh) {
+                # TODO: check this anachronic global vars and strtok game
+                $buffer =~ /^([^\s\t\n]+)/;
+                $cnode->{'lname'} = $1;
+                print_string $buffer;
+                newline;
+                newline;
+             }
+        }       # Start new section
+    }           # Has parameters
+    $node = ! $is_sh;
+}
+
 
 sub main() {
     if (@ARGV != 3) {
