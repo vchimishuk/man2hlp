@@ -1,287 +1,817 @@
 #!/usr/bin/perl
+# 
+#  Man page to help file converter
+#  Copyright (C) 1994, 1995, 1998, 2000, 2001, 2002, 2003, 2004, 2005,
+#  2007 Free Software Foundation, Inc.
+#  2002  Andrew V. Samoilov
+#  2002  Pavel Roskin
+#  2010 Andrew Borodin
+#
+#  This program is free software; you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation; either version 2 of the License, or
+#  (at your option) any later version.
+#
+#  This program is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#  GNU General Public License for more details.
+#
+#  You should have received a copy of the GNU General Public License
+#  along with this program; if not, write to the Free Software
+#  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.  */
+#
+# \file man2hlp.c
+# \brief Source: man page to help file converter
+
+# include "help.h"
+# end of include "help.h"
 
 use strict;
 use warnings;
 
-# Imported constants
-my $CHAR_NODE_END = chr(4);
+my $col = 0;            # Current output column
+my $out_row = 1;        # Current output row
+my $in_row = 0;         # Current input row
+my $no_split_flag = 0;  # Flag: Don't split section on next ".SH"
+my $skip_flag = 0;      # Flag: Skip this section.
+                        #       0 = don't skip,
+                        #       1 = skipping title,
+                        #       2 = title skipped, skipping text
+my $link_flag = 0;      # Flag: Next line is a link
+my $verbatim_flag = 0;  # Flag: Copy input to output verbatim
+my $node = 0;           # Flag: This line is an original ".SH"
 
-# Current output column
-my $col = 0;
+my $c_out;              # Output filename
+my $f_out;              # Output file
 
-# Current output row
-my $out_row = 1;
+my $c_in;               # Current input filename
 
-# Current input row
-my $in_row = 0;
-# Flag: Don't split section on next ".SH"
-my $no_split_flag = 0;
-# Flag: Skip this section.
-my $skip_flag = 0;
+my $indentation;        # Indentation level, n spaces
+my $tp_flag;            # Flag: .TP paragraph
+                        #       1 = this line is .TP label,
+                        #       2 = first line of label description.
+my $topics = undef;
 
-# Current input filename
-my $c_in;
-
-# Output file
-my $f_out;
-
-# Flag: Copy input to output verbatim
-my $verbatim_flag = 0;
-
-# Flag: Next line is a link
-my $link_flag = 0;
-
-# Indentation level, n spaces
-my $indentation;
-
-# Flag: .TP paragraph
-# 1 = this line is .TP label,
-# 2 = first line of label description.
-my $tp_flag;
-
-# Current node
-my $cnode;
-
-# C strtok workaround
-my @tokens;
-
-# Change output line
-sub newline() {
-    $out_row++;
-    $col = 0;
-    print $f_out "\n";
-}
-
-#Output the string
-sub print_string($) {
-    my $buffer = shift;
-
-    # The length of current word
-    my $len;
-    # Current character
-    my $c_num = 0;
-    my $backslash_flag = 0;
-
-    # Skipping lines?
-    return if $skip_flag;
-
-    # Copying verbatim?
-    if ($verbatim_flag) {
-        # Attempt to handle backslash quoting
-        $buffer =~ s/(\\(.))/$2/g;
-        print $f_out $buffer;
-    }
-    else {
-        # Split into words
-        foreach my $word (split /(\s|\n|\t)+/, $buffer) {
-            $len = substr $word;
-            if ($col > 0) {
-                print $f_out, ' ';
-                $col++;
-            }
-            elsif ($indentation) {
-                print $f_out ' ' while $col++ < $indentation;
-            }
-            # Attempt to handle backslash quoting
-            $word =~ s/\\\\/\\/g;
-            print $f_out $word;
-            $col += $len;
-        }
+sub struct_node() {
+    return {
+        "node"          => undef,   # Section name
+        "lname"         => undef,   # Translated .SH, undef if not translated
+        "next"          => undef,
+        "heading_level" => undef
     }
 }
 
-sub fopen_error($) {
-    my ($filename) = @_;
-    warn "man2hlp: Cannot open file $filename\n";
-    exit 3;
+my $nodes = struct_node();
+my $cnode;              # Current node
+
+# Report error in input
+sub print_error($)
+{
+    my ($message) = @_;
+    warn "man2hlp: %s in file \"%s\" on line %d\n", $message, $c_in, $in_row;
 }
 
-sub fclose_error($) {
-    my ($filename) = @_;
-    if (defined $filename) {
-        warn "man2hlp: Cannot close file $filename\n";
+# Do open, exit if it fails
+sub fopen_check ($$)
+{
+    my ($mode, $filename) = @_;
+    my $f;
+
+    unless (open $f, $mode, $filename)
+    {
+        warn sprintf("man2hlp: Cannot open file \"%s\" ($!)\n", $filename);
+        exit 3;
     }
-    else {
-        warn "man2hlp: Cannot close file\n";
-    }
-    exit 3;
+    return $f;
 }
 
-
-# Handle NODE and .SH commands.  is_sh is 1 for .SH, 0 for NODE
-sub handle_node($$) {
-    my ($buffer, $is_sh) = @_;
-    my heading_level;
-    my len;
-
-    # If we already skipped a section, don't skip another
-    $skip_flag = 0 if $skip_flag == 2;
-    # Get the command parameters
-    unless (@tokens) {
-        print_error "Syntax error: .SH: no title\n";
-        return;
+# Do close, exit if it fails
+sub fclose_check($)
+{
+    my ($f) = @_;
+    unless (close $f) 
+    {
+        warn "man2hlp: Cannot close file ($!)\n";
+        exit 3;
     }
-    $buffer = shift @tokens;
-    # Remove quotes */
-    if (substr($buffer, 0, 1) eq '"') {
-        $buffer =~ s/^"//;
-        $buffer =~ s/"$//;
-        # Calculate heading level
-        $heading_level = 0;
-        $heading_level++ while substr($buffer, $heading_level, 0) eq ' ';
-        # Heading level must be even
-        unless ($heading_level % 2) {
-            print_error "Syntax error: .SH: odd heading level\n";
-        }
-        if ($no_split_flag) {
-            # Don't start a new section
-            newline;
-            print_string $buffer;
-            newline;
-            newline;
-            $no_split_flag = 0;
-        }
-        elsif ($skip_flag) {
-            # Skipping title and marking text for skipping
-            $skip_flag = 2;
-        }
-        else {
-            $buffer =~ s/^\s+//;
-            if (!$is_sh || !$node) {
-                # Start a new section, but omit empty section names
-                if ($buffer ne '') {
-                    printf $f_out, "%s[%s]", $CHAR_NODE_END, $buffer;
-                    newline;
-                }
-
-                # Add section to the linked list
-                if (! $cnode) {
-                    cnode = &nodes;
-                }
-                else {
-                    $cnode->{'next'} = {};
-                    $cnode = cnode->{'next'};
-                }
-                $cnode->{'node'} = $buffer;
-                $cnode->{'lname'} = undef;
-                $cnode->{'next'} = undef;
-                $cnode->{'heading_level'} = $heading_level;
-            }
-            if ($is_sh) {
-                # TODO: check this anachronic global vars and strtok game
-                $buffer =~ /^([^\s\t\n]+)/;
-                $cnode->{'lname'} = $1;
-                print_string $buffer;
-                newline;
-                newline;
-             }
-        }       # Start new section
-    }           # Has parameters
-    $node = ! $is_sh;
 }
 
+# /* Change output line */
+# static void
+# newline (void)
+# {
+#     out_row++;
+#     col = 0;
+#     fprintf (f_out, "\n");
+# }
+# 
+# /* Calculate the length of string */
+# static int
+# string_len (const char *buffer)
+# {
+#     static int anchor_flag = 0; /* Flag: Inside hypertext anchor name */
+#     static int lc_link_flag = 0;        /* Flag: Inside hypertext link target name */
+#     int backslash_flag = 0;     /* Flag: Backslash quoting */
+#     int c;                      /* Current character */
+#     int len = 0;                /* Result: the length of the string */
+# 
+#     while (*(buffer))
+#     {
+#         c = *buffer++;
+#         if (c == CHAR_LINK_POINTER)
+#             lc_link_flag = 1;   /* Link target name starts */
+#         else if (c == CHAR_LINK_END)
+#             lc_link_flag = 0;   /* Link target name ends */
+#         else if (c == CHAR_NODE_END)
+#         {
+#             /* Node anchor name starts */
+#             anchor_flag = 1;
+#             /* Ugly hack to prevent loss of one space */
+#             len++;
+#         }
+#         /* Don't add control characters to the length */
+#         if (c >= 0 && c < 32)
+#             continue;
+#         /* Attempt to handle backslash quoting */
+#         if (c == '\\' && !backslash_flag)
+#         {
+#             backslash_flag = 1;
+#             continue;
+#         }
+#         backslash_flag = 0;
+#         /* Increase length if not inside anchor name or link target name */
+#         if (!anchor_flag && !lc_link_flag)
+#             len++;
+#         if (anchor_flag && c == ']')
+#         {
+#             /* Node anchor name ends */
+#             anchor_flag = 0;
+#         }
+#     }
+#     return len;
+# }
+# 
+# /* Output the string */
+# static void
+# print_string (char *buffer)
+# {
+#     int len;                    /* The length of current word */
+#     int c;                      /* Current character */
+#     int backslash_flag = 0;
+# 
+#     /* Skipping lines? */
+#     if (skip_flag)
+#         return;
+#     /* Copying verbatim? */
+#     if (verbatim_flag)
+#     {
+#         /* Attempt to handle backslash quoting */
+#         while (*(buffer))
+#         {
+#             c = *buffer++;
+#             if (c == '\\' && !backslash_flag)
+#             {
+#                 backslash_flag = 1;
+#                 continue;
+#             }
+#             backslash_flag = 0;
+#             fputc (c, f_out);
+#         }
+#     }
+#     else
+#     {
+#         /* Split into words */
+#         buffer = strtok (buffer, " \t\n");
+#         /* Repeat for each word */
+#         while (buffer)
+#         {
+#             /* Skip empty strings */
+#             if (*(buffer))
+#             {
+#                 len = string_len (buffer);
+#                 /* Words are separated by spaces */
+#                 if (col > 0)
+#                 {
+#                     fputc (' ', f_out);
+#                     col++;
+#                 }
+#                 else if (indentation)
+#                 {
+#                     while (col++ < indentation)
+#                         fputc (' ', f_out);
+#                 }
+#                 /* Attempt to handle backslash quoting */
+#                 while (*(buffer))
+#                 {
+#                     c = *buffer++;
+#                     if (c == '\\' && !backslash_flag)
+#                     {
+#                         backslash_flag = 1;
+#                         continue;
+#                     }
+#                     backslash_flag = 0;
+#                     fputc (c, f_out);
+#                 }
+#                 /* Increase column */
+#                 col += len;
+#             }
+#             /* Get the next word */
+#             buffer = strtok (NULL, " \t\n");
+#         }                       /* while */
+#     }
+# }
+# 
+# /* Like print_string but with printf-like syntax */
+# static void
+# printf_string (const char *format, ...)
+# {
+#     va_list args;
+#     char buffer[BUFFER_SIZE];
+# 
+#     va_start (args, format);
+#     g_vsnprintf (buffer, sizeof (buffer), format, args);
+#     va_end (args);
+#     print_string (buffer);
+# }
+# 
+# /* Handle NODE and .SH commands.  is_sh is 1 for .SH, 0 for NODE */
+# static void
+# handle_node (char *buffer, int is_sh)
+# {
+#     int len, heading_level;
+# 
+#     /* If we already skipped a section, don't skip another */
+#     if (skip_flag == 2)
+#     {
+#         skip_flag = 0;
+#     }
+#     /* Get the command parameters */
+#     buffer = strtok (NULL, "");
+#     if (buffer == NULL)
+#     {
+#         print_error ("Syntax error: .SH: no title");
+#         return;
+#     }
+#     else
+#     {
+#         /* Remove quotes */
+#         if (buffer[0] == '"')
+#         {
+#             buffer++;
+#             len = strlen (buffer);
+#             if (buffer[len - 1] == '"')
+#             {
+#                 len--;
+#                 buffer[len] = 0;
+#             }
+#         }
+#         /* Calculate heading level */
+#         heading_level = 0;
+#         while (buffer[heading_level] == ' ')
+#             heading_level++;
+#         /* Heading level must be even */
+#         if (heading_level & 1)
+#             print_error ("Syntax error: .SH: odd heading level");
+#         if (no_split_flag)
+#         {
+#             /* Don't start a new section */
+#             newline ();
+#             print_string (buffer);
+#             newline ();
+#             newline ();
+#             no_split_flag = 0;
+#         }
+#         else if (skip_flag)
+#         {
+#             /* Skipping title and marking text for skipping */
+#             skip_flag = 2;
+#         }
+#         else
+#         {
+#             buffer += heading_level;
+#             if (!is_sh || !node)
+#             {
+#                 /* Start a new section, but omit empty section names */
+#                 if (*buffer)
+#                 {
+#                     fprintf (f_out, "%c[%s]", CHAR_NODE_END, buffer);
+#                     newline ();
+#                 }
+# 
+#                 /* Add section to the linked list */
+#                 if (!cnode)
+#                 {
+#                     cnode = &nodes;
+#                 }
+#                 else
+#                 {
+#                     cnode->next = malloc (sizeof (nodes));
+#                     cnode = cnode->next;
+#                 }
+#                 cnode->node = strdup (buffer);
+#                 cnode->lname = NULL;
+#                 cnode->next = NULL;
+#                 cnode->heading_level = heading_level;
+#             }
+#             if (is_sh)
+#             {
+#                 /* print_string() strtok()es buffer, so */
+#                 cnode->lname = strdup (buffer);
+#                 print_string (buffer);
+#                 newline ();
+#                 newline ();
+#             }
+#         }                       /* Start new section */
+#     }                           /* Has parameters */
+#     node = !is_sh;
+# }
+# 
+# /* Convert character from the macro name to the font marker */
+# static inline char
+# char_to_font (char c)
+# {
+#     switch (c)
+#     {
+#     case 'R':
+#         return CHAR_FONT_NORMAL;
+#     case 'B':
+#         return CHAR_FONT_BOLD;
+#     case 'I':
+#         return CHAR_FONT_ITALIC;
+#     default:
+#         return 0;
+#     }
+# }
+# 
+# /*
+#  * Handle alternate font commands (.BR, .IR, .RB, .RI, .BI, .IB)
+#  * Return 0 if the command wasn't recognized, 1 otherwise
+#  */
+# static int
+# handle_alt_font (char *buffer)
+# {
+#     char *p;
+#     char *w;
+#     char font[2];
+#     int in_quotes = 0;
+#     int alt_state = 0;
+# 
+#     if (strlen (buffer) != 3)
+#         return 0;
+# 
+#     if (buffer[0] != '.')
+#         return 0;
+# 
+#     font[0] = char_to_font (buffer[1]);
+#     font[1] = char_to_font (buffer[2]);
+# 
+#     /* Exclude names with unknown characters, .BB, .II and .RR */
+#     if (font[0] == 0 || font[1] == 0 || font[0] == font[1])
+#         return 0;
+# 
+#     p = strtok (NULL, "");
+#     if (p == NULL)
+#     {
+#         return 1;
+#     }
+# 
+#     w = buffer;
+#     *w++ = font[0];
+# 
+#     while (*p)
+#     {
+# 
+#         if (*p == '"')
+#         {
+#             in_quotes = !in_quotes;
+#             p++;
+#             continue;
+#         }
+# 
+#         if (*p == ' ' && !in_quotes)
+#         {
+#             p++;
+#             /* Don't change font if we are at the end */
+#             if (*p != 0)
+#             {
+#                 alt_state = !alt_state;
+#                 *w++ = font[alt_state];
+#             }
+# 
+#             /* Skip more spaces */
+#             while (*p == ' ')
+#                 p++;
+# 
+#             continue;
+#         }
+# 
+#         *w++ = *p++;
+#     }
+# 
+#     /* Turn off attributes if necessary */
+#     if (font[alt_state] != CHAR_FONT_NORMAL)
+#         *w++ = CHAR_FONT_NORMAL;
+# 
+#     *w = 0;
+#     print_string (buffer);
+# 
+#     return 1;
+# }
+# 
+# /* Handle .IP and .TP commands.  is_tp is 1 for .TP, 0 for .IP */
+# static void
+# handle_tp_ip (int is_tp)
+# {
+#     if (col > 0)
+#         newline ();
+#     newline ();
+#     if (is_tp)
+#     {
+#         tp_flag = 1;
+#         indentation = 0;
+#     }
+#     else
+#         indentation = 8;
+# }
+# 
+# /* Handle all the roff dot commands.  See man groff_man for details */
+# static void
+# handle_command (char *buffer)
+# {
+#     int len;
+# 
+#     /* Get the command name */
+#     strtok (buffer, " \t");
+# 
+#     if (strcmp (buffer, ".SH") == 0)
+#     {
+#         indentation = 0;
+#         handle_node (buffer, 1);
+#     }
+#     else if (strcmp (buffer, ".\\\"NODE") == 0)
+#     {
+#         handle_node (buffer, 0);
+#     }
+#     else if (strcmp (buffer, ".\\\"DONT_SPLIT\"") == 0)
+#     {
+#         no_split_flag = 1;
+#     }
+#     else if (strcmp (buffer, ".\\\"SKIP_SECTION\"") == 0)
+#     {
+#         skip_flag = 1;
+#     }
+#     else if (strcmp (buffer, ".\\\"LINK2\"") == 0)
+#     {
+#         /* Next two input lines form a link */
+#         link_flag = 2;
+#     }
+#     else if ((strcmp (buffer, ".PP") == 0)
+#              || (strcmp (buffer, ".P") == 0) || (strcmp (buffer, ".LP") == 0))
+#     {
+#         indentation = 0;
+#         /* End of paragraph */
+#         if (col > 0)
+#             newline ();
+#         newline ();
+#     }
+#     else if (strcmp (buffer, ".nf") == 0)
+#     {
+#         /* Following input lines are to be handled verbatim */
+#         verbatim_flag = 1;
+#         if (col > 0)
+#             newline ();
+#     }
+#     else if (strcmp (buffer, ".I") == 0 || strcmp (buffer, ".B") == 0
+#              || strcmp (buffer, ".SB") == 0)
+#     {
+#         /* Bold text or italics text */
+#         char *p;
+#         char *w;
+#         int backslash_flag = 0;
+# 
+#         /* .SB [text]
+#          * Causes the text on the same line or the text on the
+#          * next  line  to  appear  in boldface font, one point
+#          * size smaller than the default font.
+#          */
+# 
+#         /* FIXME: text is optional, so there is no error */
+#         p = strtok (NULL, "");
+#         if (p == NULL)
+#         {
+#             print_error ("Syntax error: .I | .B | .SB : no text");
+#             return;
+#         }
+# 
+#         *buffer = (buffer[1] == 'I') ? CHAR_FONT_ITALIC : CHAR_FONT_BOLD;
+# 
+#         /* Attempt to handle backslash quoting */
+#         for (w = &buffer[1]; *p; p++)
+#         {
+#             if (*p == '\\' && !backslash_flag)
+#             {
+#                 backslash_flag = 1;
+#                 continue;
+#             }
+#             backslash_flag = 0;
+#             *w++ = *p;
+#         }
+# 
+#         *w++ = CHAR_FONT_NORMAL;
+#         *w = 0;
+#         print_string (buffer);
+#     }
+#     else if (strcmp (buffer, ".TP") == 0)
+#     {
+#         handle_tp_ip (1);
+#     }
+#     else if (strcmp (buffer, ".IP") == 0)
+#     {
+#         handle_tp_ip (0);
+#     }
+#     else if (strcmp (buffer, ".\\\"TOPICS") == 0)
+#     {
+#         if (out_row > 1)
+#         {
+#             print_error ("Syntax error: .\\\"TOPICS must be first command");
+#             return;
+#         }
+#         buffer = strtok (NULL, "");
+#         if (buffer == NULL)
+#         {
+#             print_error ("Syntax error: .\\\"TOPICS: no text");
+#             return;
+#         }
+#         /* Remove quotes */
+#         if (buffer[0] == '"')
+#         {
+#             buffer++;
+#             len = strlen (buffer);
+#             if (buffer[len - 1] == '"')
+#             {
+#                 len--;
+#                 buffer[len] = 0;
+#             }
+#         }
+#         topics = strdup (buffer);
+#     }
+#     else if (strcmp (buffer, ".br") == 0)
+#     {
+#         if (col)
+#             newline ();
+#     }
+#     else if (strncmp (buffer, ".\\\"", 3) == 0)
+#     {
+#         /* Comment */
+#     }
+#     else if (strcmp (buffer, ".TH") == 0)
+#     {
+#         /* Title header */
+#     }
+#     else if (strcmp (buffer, ".SM") == 0)
+#     {
+#         /* Causes the text on the same line or the text on the
+#          * next  line  to  appear  in a font that is one point
+#          * size smaller than the default font. */
+#         buffer = strtok (NULL, "");
+#         if (buffer)
+#             print_string (buffer);
+#     }
+#     else if (handle_alt_font (buffer) == 1)
+#     {
+#         return;
+#     }
+#     else
+#     {
+#         /* Other commands are ignored */
+#         char warn_str[BUFFER_SIZE];
+#         g_snprintf (warn_str, sizeof (warn_str), "Warning: unsupported command %s", buffer);
+#         print_error (warn_str);
+#         return;
+#     }
+# }
+# 
+# static struct links
+# {
+#     char *linkname;             /* Section name */
+#     int line;                   /* Input line in ... */
+#     const char *filename;
+#     struct links *next;
+# } links, *current_link;
+# 
+# static void
+# handle_link (char *buffer)
+# {
+#     static char old[80];
+#     int len;
+#     char *amp;
+#     const char *amp_arg;
+# 
+#     switch (link_flag)
+#     {
+#     case 1:
+#         /* Old format link, not supported */
+#         break;
+#     case 2:
+#         /* First part of new format link */
+#         /* Bold text or italics text */
+#         if (buffer[0] == '.' && (buffer[1] == 'I' || buffer[1] == 'B'))
+#             for (buffer += 2; *buffer == ' ' || *buffer == '\t'; buffer++);
+#         g_strlcpy (old, buffer, sizeof (old));
+#         link_flag = 3;
+#         break;
+#     case 3:
+#         /* Second part of new format link */
+#         if (buffer[0] == '.')
+#             buffer++;
+#         if (buffer[0] == '\\')
+#             buffer++;
+#         if (buffer[0] == '"')
+#             buffer++;
+#         len = strlen (buffer);
+#         if (len && buffer[len - 1] == '"')
+#         {
+#             buffer[--len] = 0;
+#         }
+# 
+#         /* "Layout\&)," -- "Layout" should be highlighted, but not ")," */
+#         amp = strstr (old, "\\&");
+#         if (amp)
+#         {
+#             *amp = 0;
+#             amp += 2;
+#             amp_arg = amp;
+#         }
+#         else
+#         {
+#             amp_arg = "";
+#         }
+# 
+#         printf_string ("%c%s%c%s%c%s\n", CHAR_LINK_START, old,
+#                        CHAR_LINK_POINTER, buffer, CHAR_LINK_END, amp_arg);
+#         link_flag = 0;
+#         /* Add to the linked list */
+#         if (current_link)
+#         {
+#             current_link->next = malloc (sizeof (links));
+#             current_link = current_link->next;
+#             current_link->next = NULL;
+#         }
+#         else
+#         {
+#             current_link = &links;
+#         }
+#         current_link->linkname = strdup (buffer);
+#         current_link->filename = c_in;
+#         current_link->line = in_row;
+#         break;
+#     }
+# }
+# 
 
-sub main() {
-    if (@ARGV != 3) {
+sub main
+{
+    my $len;                    # Length of input line
+    my $c_man;                  # Manual filename
+    my $c_tmpl;                 # Template filename
+    my $f_man;                  # Manual file
+    my $f_tmpl;                 # Template file
+    my $buffer;                 # Full input line
+    my $lc_node = undef;
+    my $outfile_buffer;         # Large buffer to keep the output file
+    my $cont_start;             # Start of [Contents]
+    my $file_end;               # Length of the output file
+
+    # Validity check for arguments
+    if (@ARGV != 4)
+    {
         warn "Usage: man2hlp file.man template_file helpfile\n";
         return 3;
     }
 
-    my ($c_man, $c_tmpl, $c_out) = @ARGV;
+    $c_man  = $ARGV[1];
+    $c_tmpl = $ARGV[2];
+    $c_out  = $ARGV[3];
 
     # First stage - process the manual, write to the output file
-    open(my $f_man, '<', $c_man) or fopen_error($c_man);
-    open(my $f_out, '>', $c_out) or fopen_error($c_out);
+
+    $f_man = fopen_check "<", $c_man;
+    $f_out = fopen_check ">", $c_out;
     $c_in = $c_man;
 
     # Repeat for each input line
-    while (<$f_man>) {
-        my $buffer = $_;
-        my $input_line = $_;
+    while (<$f_man>)
+    {
         # Remove terminating newline
-        chomp $input_line;
-        # Input line without initial
-        $input_line =~ s/^\\&//;
+        chomp;
+        $buffer = $_;
+        $input_line;       # Input line without initial "\&"
 
-        if ($verbatim_flag) {
-            if ($input_line eq ".fi") {
+        if (substr($buffer, 0, 1) eq '\\' && substr($buffer, 1, 1) eq '&')
+        {
+            $input_line = substr($buffer, 2);
+        }
+        else
+        {
+            $input_line = $buffer;
+        }
+
+        $in_row++;
+        $len = length($input_line);
+
+        if ($verbatim_flag)
+        {
+            # Copy the line verbatim
+            if ($input_line eq ".fi")
+            {
                 $verbatim_flag = 0;
             }
-            else {
+            else
+            {
                 print_string $input_line;
                 newline;
             }
         }
-        elsif ($link_flag) {
+        elsif ($link_flag)
+        {
             # The line is a link
             handle_link $input_line;
         }
-        elsif (substr($buffer, 0, 1) eq '.') {
+        elsif (substr($buffer, 0, 1) eq '.')
+        {
             # The line is a roff command
             handle_command $input_line;
         }
-        else {
-            # A normal line, just output it
+        else
+        {
+            #A normal line, just output it
             print_string $input_line;
         }
-
         # .TP label processed as usual line
-        if ($tp_flag) {
-            if ($tp_flag == 1) {
+        if ($tp_flag)
+        {
+            if ($tp_flag == 1)
+            {
                 $tp_flag = 2;
             }
-            else {
+            else
+            {
                 $tp_flag = 0;
                 $indentation = 8;
-                if ($col >= $indentation) {
+                if ($col >= $indentation)
+                {
                     newline;
                 }
-                else {
-                    while (++$col < $indentation) {
-                        print $f_out, ' ';
-                    }
+                else
+                {
+                    print $f_our " " while ++$col < $indentation;
                 }
             }
         }
     }
 
     newline;
-    close $f_man or fclose_error($c_man);
+    fclose_check $f_man;
     # First stage ends here, closing the manual
 
     # Second stage - process the template file
-    open my $f_tmpl, '<', $c_tmpl or fopen_error($c_tmpl);
+    $f_tmpl = fopen_check "<", c_tmpl;
     $c_in = $c_tmpl;
 
-    my $lc_node = undef;
-
     # Repeat for each input line
-    while (<$f_tmpl>) {
-        my $buffer = $_;
-        chomp $buffer;
-
-        if (defined $lc_node) {
-            if ($buffer ne '') {
-                $cnode{'lname'} = $buffer;
-            }
+    # Read a line
+    while (<$f_tmpl>)
+    {
+        $buffer = $_;
+        if (defined $lc_node)
+        {
+            chomp $buffer;
             $lc_node = undef;
         }
-        else {
+        else
+        {
             my $char_node_end = index($buffer, $CHAR_NODE_END);
             $lc_node = $char_node_end < 0 ? undef : substr($buffer, $char_node_end);
 
-            if (defined(lc_node) && substr(lc_node, 1, 1) eq '[') {
-                my $p = index($lc_node, ']');
+            if (defined $lc_node && substr($lc_node, 1, 1) eq '[')
+            {
+                 my $p = strchr (lc_node, ']');
+                                 my $p = index($lc_node, ']');
                 if ($p >= 0) {
-                    if (substr($lc_node, 1, 6) eq '[main]') {
+                    if (substr($lc_node, 1, 6) eq '[main]')
+                    {
                         $lc_node = undef;
                     }
-                    else {
-                        if (! defined $cnode) {
-                            $cnode = &$nodes;
+                    else
+                    {
+                        if (! defined $cnode)
+                        {
+                            $cnode = $nodes;
                         }
-                        else {
-                            $cnode->{'next'} = {};
+                        else
+                        {
+                            $cnode->{'next'} = struct_node();
                             $cnode = $cnode->{'next'};
                         }
                         $cnode->{'$node'} = substr($lc_node, 1, $p-1);
@@ -290,45 +820,57 @@ sub main() {
                         $cnode->{'heading_level'} = 0;
                     }
                 }
-                else {
-                    $lc_node = undef;
+                else
+                {
+                  $lc_node = undef;
                 }
-        }
-        else {
-            $lc_node = undef;
+            }
+            else
+            {
+                $lc_node = undef;
+            }
         }
         print $f_out $buffer;
     }
 
     $cont_start = tell $f_out;
-    if ($cont_start <= 0) {
+    if ($cont_start <= 0)
+    {
         perror $c_out;
-        exit 1;
+        return 1;
     }
 
-    if ($topics) {
+    if ($topics)
+    {
         printf $f_out "\004[Contents]\n%s\n\n", $topics;
     }
-    else {
+    else
+    {
         printf $f_out "\004[Contents]\n";
     }
 
-    for ($current_link = $links; defined $current_link && defined $current_link->{'linkname'};) {
+    for ($current_link = $links; defined $current_link && defined $current_link->{'linkname'};)
+    {
         my $found = 0;
         my $next = $current_link->{'next'};
 
-        if ($current_link->{'linkname'} eq "Contents") {
-            found = 1;
+        if ($current_link->{'linkname'} eq "Contents")
+        {
+            $found = 1;
         }
-        else {
-            for ($cnode = &$nodes; defined $cnode && defined $cnode->{'node'}; $cnode = $cnode->{'next'}) {
-                if ($cnode->{'node'} eq $current_link->{'linkname'}) {
+        else
+        {
+            for ($cnode = $nodes; defined $cnode && defined $cnode->{'node'}; $cnode = $cnode->{'next'})
+            {
+                if ($cnode->{'node'} eq $current_link->{'linkname'})
+                {
                     $found = 1;
                     last;
                 }
             }
         }
-        if (! $found) {
+        if (! $found)
+        {
             $buffer = sprintf "Stale link \"%s\"", $current_link->{'linkname'};
             $c_in = $current_link->{'filename'};
             $in_row = $current_link->{'line'};
@@ -338,7 +880,8 @@ sub main() {
         $current_link = $next;
     }
 
-    for ($cnode = &$nodes; defined $cnode && defined $cnode->{'node'};) {
+    for ($cnode = $nodes; defined $cnode && defined $cnode->{'node'};)
+    {
         my $next = $cnode->{'next'};
         $lc_node = $cnode->{'node'};
 
@@ -348,20 +891,19 @@ sub main() {
         }
         printf $f_out "\n";
 
-        $cnode = $next;
     }
 
     $file_end = tell $f_out;
 
     # Sanity check
-    if (($file_end <= 0) || ($file_end - $cont_start <= 0)) {
-        perror $c_out;
-        exit 1;
+    if (($file_end <= 0) || ($file_end - $cont_start <= 0))
+    {
+        warn $c_out ."\n";
+        return 1;
     }
 
-    close $f_out or fclose_error($c_out);
-    close $f_tmpl or fclose_error($c_tmpl);
-
+    fclose_check $f_out;
+    fclose_check $f_tmpl;
     # Second stage ends here, closing all files, note the end of output
 
     #
@@ -370,22 +912,22 @@ sub main() {
     #
     ## TODO: replace writing to f_out by writing to a string
     $outfile_buffer = '';
-    open $f_out, '<', $c_out or fopen_error($c_out);
+    $f_out = fopen_check '<', $c_out;
     $outfile_buffer .= $_ while <$f_out>;
-    close $f_out or fclose_error($c_out);
+    fclose_check $f_out;
     # Now the output file is in the memory
 
     # Again open output file for writing
-    open $f_out, '>', $c_out or fopen_error $c_out;
+    $f_out = fopen_check '>', $c_out;
 
     # Write part after the "Contents" node
     print $fout substr($outfile_buffer, $cont_start, $file_end - $cont_start);
 
     # Write part before the "Contents" node
-    printf $f_out substr($outfile_buffer, 0, cont_start-1);
-    close $f_out or fclose_error($c_out);
+    printf $f_out substr($outfile_buffer, 0, $cont_start-1);
+    fclose_check $f_out;
+
+    return 0;
 }
 
-
-
-main();
+exit main();
